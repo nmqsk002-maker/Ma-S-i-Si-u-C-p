@@ -1722,3 +1722,227 @@ def upgraded_init_user(user_id: int, name: str) -> None:
     if need_save:
         save_users_database_to_storage()
 
+# Kế thừa tiếp tục từ Phần 1 đến Phần 15...
+
+# ==================================================================
+# PHẦN 16: TÍCH HỢP MINI-GAME TÀI XỈU VÀNG ĐỒNG BỘ 100% NÚT BẤM
+# ==================================================================
+
+# 1. KỊCH BẢN THOẠI NGẪU NHIÊN KHI KẾT QUẢ TÀI XỈU XUẤT HIỆN (DICE DIALOGUES)
+DICE_OPEN_DIALOGUES = [
+    "🎲 **TIẾNG XÚC XẮC VANG LÊN TRÊN CHIẾU BẠC THẦN THÁNH!** 🎲\n\n"
+    "Hộp lắc vàng đã mở, ba viên xúc xắc mang theo vận mệnh của các thợ săn vừa dừng lại!\n\n"
+    "▪️ Kết quả xúc xắc: **[ {d1} ] - [ {d2} ] - [ {d3} ]**\n"
+    "📊 **Tổng điểm:** `{total} điểm` —👉 **【 {result_text} 】**\n\n"
+    "🎉 Xin chúc mừng những linh hồn dũng cảm đã đặt trọn niềm tin vào cửa này! Tiền thưởng đã được giải ngân về ví.",
+    
+    "🔥 **VÒNG QUAY SỐ PHẬN ĐÃ PHÁN QUYẾT!** 🔥\n\n"
+    "Khói bụi sảnh cược tan đi, để lộ kết quả xúc xắc định mệnh đêm nay:\n\n"
+    "▪️ Xúc xắc ma thuật: **[ {d1} ] - [ {d2} ] - [ {d3} ]**\n"
+    "📊 **Tổng số nút:** `{total} điểm` —👉 **【 {result_text} 】**\n\n"
+    "💰 Kẻ thắng reo hò thu vàng về ngân khố, người thua lẳng lặng mài sắc vũ khí chờ đợi cơ hội phục hận!"
+]
+
+# Bộ lưu trữ trạng thái phiên Tài Xỉu tạm thời để chống đơ nút bấm
+tx_sessions = {}
+
+# 2. HÀM DỰNG GIAO DIỆN MENU ĐIỀU KHIỂN TÀI XỈU (GROUP MINI-GAME KEYBOARD)
+def get_tai_xiu_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """Tạo giao diện nút bấm đặt cược trực quan cho Mini-game Tài Xỉu"""
+    markup = InlineKeyboardMarkup(row_width=2)
+    
+    if chat_id not in tx_sessions:
+        tx_sessions[chat_id] = {"status": "CLOSED", "bets": {}}
+        
+    session = tx_sessions[chat_id]
+    
+    if session["status"] == "CLOSED":
+        markup.add(InlineKeyboardButton("🎲 Mở Bát Phiên Tài Xỉu Mới", callback_data=f"tx_open_{chat_id}"))
+    else:
+        markup.add(
+            InlineKeyboardButton("🔺 ĐẶT TÀI (11-17)", callback_data=f"tx_bet_{chat_id}_TAI"),
+            InlineKeyboardButton("🔻 ĐẶT XỈU (4-10)", callback_data=f"tx_bet_{chat_id}_XIU")
+        )
+        markup.add(InlineKeyboardButton("📋 Xem Danh Sách Cược", callback_data=f"tx_list_{chat_id}"))
+        markup.add(InlineKeyboardButton("🎰 MỞ BÁT XÚC XẮC", callback_data=f"tx_roll_{chat_id}"))
+        
+    return markup
+
+# 3. BỘ TIẾP NHẬN SỰ KIỆN CALLBACK VẬN HÀNH MINI-GAME TÀI XỈU
+@bot.callback_query_handler(func=lambda call: call.data.startswith("tx_"))
+def handle_tai_xiu_callbacks(call):
+    """
+    Điều phối toàn bộ các hành động đặt cược, hiển thị danh sách và lắc xúc xắc công khai.
+    Đã sửa lỗi đồng bộ, liên kết trực tiếp ví vàng users_db và tự giải phóng trạng thái đơ nút.
+    """
+    if MAINTENANCE_MODE and not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "⚙️ Hệ thống đang bảo trì. Các sảnh mini-game tạm khóa!", show_alert=True)
+        return
+        
+    user_id = call.from_user.id
+    data = call.data
+    chat_id = call.message.chat.id
+    message_id = call.message.message_id
+    
+    # Chống spam nút bấm qua bộ lọc bảo mật của Phần 2
+    if not check_security_privilege(call, require_admin=False):
+        return
+        
+    parts = data.split("_")
+    action = parts[1]
+    game_chat_id = int(parts[2])
+    
+    if game_chat_id not in tx_sessions:
+        tx_sessions[game_chat_id] = {"status": "CLOSED", "bets": {}}
+        
+    session = tx_sessions[game_chat_id]
+    u = users_db[user_id]
+    
+    # ---- 3.1 HÀNH ĐỘNG: MỞ PHIÊN CƯỢC MỚI ----
+    if action == "open":
+        if session["status"] == "OPEN":
+            bot.answer_callback_query(call.id, "⚠️ Phiên cược hiện tại đang mở sẵn rồi!", show_alert=True)
+            return
+            
+        with db_lock:
+            session["status"] = "OPEN"
+            session["bets"] = {}
+            
+        lobby_msg = (
+            "🎲 **SẢNH CƯỢC TÀI XỈU VÀNG ĐÃ KHAI MỞ** 🎲\n\n"
+            "Hãy dùng Menu nút bấm bên dưới để đặt cược số tiền bảo chứng của bạn.\n"
+            "• **TÀI:** Tổng điểm 3 xúc xắc từ 11 đến 17 (Ăn x2).\n"
+            "• **XỈU:** Tổng điểm 3 xúc xắc từ 4 đến 10 (Ăn x2).\n"
+            "❌ *Lưu ý: Nếu xúc xắc ra Bộ Ba Đồng Nhất (3 mặt giống nhau), nhà cái thu toàn bộ tiền cược!*\n\n"
+            "💰 Hạn mức cược mặc định: `1,000 Vàng` / lần bấm nút."
+        )
+        try:
+            bot.edit_message_text(lobby_msg, game_chat_id, message_id, parse_mode="Markdown", reply_markup=get_tai_xiu_keyboard(game_chat_id))
+            bot.answer_callback_query(call.id, "Mở bát phiên cược thành công!")
+        except Exception as e: print(f"Lỗi mở phiên TX: {e}")
+
+    # ---- 3.2 HÀNH ĐỘNG: ĐẶT CƯỢC CỬA TÀI / XỈU ----
+    elif action == "bet":
+        choice = parts[3]  # Lấy chuỗi 'TAI' hoặc 'XIU'
+        
+        if session["status"] != "OPEN":
+            bot.answer_callback_query(call.id, "⚠️ Đã hết thời gian nhận cược cho phiên này!", show_alert=True)
+            return
+        if user_id in session["bets"]:
+            bot.answer_callback_query(call.id, f"🌟 Bạn đã đặt cửa {session['bets'][user_id]['choice']} trước đó rồi, không thể đổi cửa cược!", show_alert=True)
+            return
+        if u["gold"] < 1000:
+            bot.answer_callback_query(call.id, "❌ Không đủ Vàng! Ngân khố của bạn dưới 1,000 Vàng để khớp lệnh cược.", show_alert=True)
+            return
+            
+        with db_lock:
+            # Ghi nhận thông tin cược và khấu trừ 1K vàng lập tức khỏi tài khoản người chơi
+            u["gold"] -= 1000
+            session["bets"][user_id] = {"choice": choice, "amount": 1000, "name": u["name"]}
+            
+        bot.answer_callback_query(call.id, f"🎯 Đặt cược 1,000 Vàng vào cửa 【{choice}】 thành công!", show_alert=False)
+        
+        # Tự động lưu file JSON từ Phần 14
+        save_users_database_to_storage()
+
+    # ---- 3.3 HÀNH ĐỘNG: XEM DANH SÁCH THÀNH VIÊN ĐÃ ĐẶT CƯỢC ----
+    elif action == "list":
+        if not session["bets"]:
+            bot.answer_callback_query(call.id, "🤷‍♂️ Hiện tại chưa có thợ săn nào xuống tiền đặt cược.", show_alert=True)
+            return
+            
+        bet_list_str = "📋 DANH SÁCH CHIÊU BẠC THỜI GIAN THỰC:\n\n"
+        for bid, binfo in session["bets"].items():
+            bet_list_str += f"• {binfo['name']}: Đặt cửa {binfo['choice']} (`1,000 Vàng`)\n"
+            
+        bot.answer_callback_query(call.id, bet_list_str, show_alert=True)
+
+    # ---- 3.4 HÀNH ĐỘNG: MỞ BÁT LẮC XÚC XẮC & GIẢI NGÂN PHẦN THƯỞNG ----
+    elif action == "roll":
+        if session["status"] != "OPEN":
+            bot.answer_callback_query(call.id, "Thao tác không hợp lệ.", show_alert=True)
+            return
+        if not session["bets"]:
+            bot.answer_callback_query(call.id, "⚠️ Sảnh cược trống! Phải có ít nhất 1 người đặt cược mới có thể mở bát.", show_alert=True)
+            return
+            
+        # Thuật toán sinh số ngẫu nhiên cho 3 viên xúc xắc
+        d1 = random.randint(1, 6)
+        d2 = random.randint(1, 6)
+        d3 = random.randint(1, 6)
+        total_score = d1 + d2 + d3
+        
+        # Phân định kết quả dựa trên luật Tài Xỉu
+        if d1 == d2 == d3:
+            result_text = "BỘ BA ĐỒNG NHẤT (NHÀ CÁI THU HẾT) 💀"
+            winning_choice = "NONE"
+        elif total_score >= 11:
+            result_text = "TÀI 🎉"
+            winning_choice = "TAI"
+        else:
+            result_text = "XỈU 🎉"
+            winning_choice = "XIU"
+            
+        # TIẾN TRÌNH KHÓA LUỒNG GIẢI NGÂN VÀNG CHO NGƯỜI THẮNG
+        with db_lock:
+            payout_logs = "\n\n💸 **BẢNG KẾT TOÁN THẮNG THUA:**\n"
+            for b_uid, b_info in session["bets"].items():
+                if b_info["choice"] == winning_choice:
+                    # Thắng cược nhận lại x2 số tiền (hoàn trả 1K cược gốc + tặng 1K thưởng)
+                    users_db[b_uid]["gold"] += 2000
+                    payout_logs += f"• **{b_info['name']}**: Thắng (`+1,000 Vàng`)\n"
+                else:
+                    payout_logs += f"• **{b_info['name']}**: Thua (`-1,000 Vàng`)\n"
+                    
+            # Khép phiên cược đưa trạng thái về CLOSED
+            session["status"] = "CLOSED"
+            session["bets"] = {}
+
+        # Đồng bộ lưu lại cơ sở dữ liệu cứng JSON
+        save_users_database_to_storage()
+        
+        # Render kịch bản lời thoại xúc xắc ngẫu nhiên ra sảnh nhóm kèm bảng kết toán tiền vàng
+        final_dramatic_dice_msg = random.choice(DICE_OPEN_DIALOGUES).format(
+            d1=d1, d2=d2, d3=d3,
+            total=total_score,
+            result_text=result_text
+        ) + payout_logs
+        
+        try:
+            bot.edit_message_text(final_dramatic_dice_msg, game_chat_id, message_id, parse_mode="Markdown", reply_markup=get_tai_xiu_keyboard(game_chat_id))
+            bot.answer_callback_query(call.id, f"Mở bát thành công: {total_score} điểm!", show_alert=False)
+        except Exception as e: print(f"Lỗi thông báo kết quả Tài Xỉu: {e}")
+
+
+# 4. CÂU LỆNH ĐỒNG BỘ GÕ /TAIXIU GỌI SẢNH RA GROUP CHAT
+@bot.message_handler(commands=['taixiu'])
+def cmd_call_tai_xiu_lobby(message):
+    """Lệnh gọi nhanh sảnh Tài Xỉu ra Group Chat"""
+    # Tích hợp bộ lọc chặn bảo trì hệ thống của Phần 5 để đồng bộ bảo mật
+    if MAINTENANCE_MODE and not is_admin(message.from_user.id):
+        bot.reply_to(message, "⚙️ Hệ thống đang được Admin bảo trì nâng cấp. Sảnh cược tạm khóa!")
+        return
+
+    if message.chat.type == "private":
+        bot.reply_to(message, "❌ Mini-game đặt cược Tài Xỉu ẩn danh chỉ có thể hoạt động trong sảnh Nhóm (Group Chat)!")
+        return
+        
+    chat_id = message.chat.id
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("🎰 KÍCH HOẠT SẢNH TÀI XỈU VÀNG", callback_data=f"tx_open_{chat_id}"))
+    bot.send_message(
+        chat_id, 
+        "🎲 **HỆ THỐNG SÒNG BẠC NGÔI LÀNG THÔNG BÁO** 🎲\nHãy nhấn nút bên dưới để mở bát phiên cược cày Vàng giải trí thời gian thực trong lúc chờ đợi phòng Ma Sói tuyển quân!", 
+        reply_markup=markup
+    )
+
+
+# ==================================================================
+# VÙNG KHỞI CHẠY HỆ THỐNG TRUNG TÂM (NẰM DƯỚI CÙNG CỦA FILE PYTHON)
+# ==================================================================
+if __name__ == "__main__":
+    # Tự động nạp và khôi phục số dư ví Vàng từ file JSON cứng (Phần 14) khi khởi động
+    load_users_database_from_storage()
+    
+    print("⚡ Bot Ma Sói Siêu Cấp và Sòng Bạc Tài Xỉu đã đồng bộ trực tuyến vĩnh viễn trên Termux!")
+    bot.infinity_polling()
